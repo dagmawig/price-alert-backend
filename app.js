@@ -42,92 +42,40 @@ db.once("open", () => console.log("connected to database"));
 // checks if connection with the database is successful
 db.on("error", console.error.bind(console, "MongoDB connection error:"));
 
-// this method does web scrapping to fetch item price using item url
-async function fetchPrice(url) {
-
-    let args = ["--no-sandbox", "--disable-setuid-sandbox"]
-
-    const args1 = [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-infobars',
-        '--window-position=0,0',
-        '--ignore-certifcate-errors',
-        '--ignore-certifcate-errors-spki-list',
-        '--user-agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/65.0.3312.0 Safari/537.36"'
-    ];
-
-    const browser = await pup.launch({ headless: true, args: args1, ignoreHTTPSErrors: true }).catch(err => {
-        console.log("browser err: ", err);
-    });
-
-    const page = await browser.newPage().catch(err => {
-        console.log("newPage err: ", err);
-    });
-
-    await page.setRequestInterception(true);
-    page.on("request", request => {
-        if (
-            ["image", "stylesheet", "font", "script"].indexOf(
-                request.resourceType()
-            ) !== -1
-        ) {
-            request.abort();
-        } else {
-            request.continue();
-        }
-    });
-
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 0 })
-        // .then(async () => {
-        //     // const data = await page.evaluate(() => document.querySelector('*').outerHTML);
-        //     // console.log("data is", data);
-        // })
-        .catch(err => {
-            console.log("goto err: ", err);
-            return { success: false, err: err };
-        });
-
-
-
-    let res = await page.evaluate(() => {
-        let element = document.querySelector('span[id="priceblock_ourprice"]');
-        //console.log("element is", element.innerText)
-        if (element && element.innerText.replace('$', '') == parseFloat(element.innerText.replace('$', ''))) return { success: true, data: element.innerText };
-        else {
-            element = document.querySelector('span[id="priceblock_dealprice"]');
-
-            if (element && element.innerText.replace('$', '') == parseFloat(element.innerText.replace('$', ''))) return { success: true, data: element.innerText };
-            else {
-                element = document.querySelector('span[id="priceblock_saleprice"]');
-
-                if (element && element.innerText.replace('$', '') == parseFloat(element.innerText.replace('$', ''))) return { success: true, data: element.innerText };
-                else return { success: false, err: "no such element" };
-            }
-        }
-    }).catch(async err => {
-        console.log("eval err: ", err);
-        await page.close();
-        await browser.close();
-        return { success: false, err: err };
-    });
-
-    await page.close();
-    await browser.close();
-
-    return res;
-
+// Amazon price request option
+let options = {
+    method: "GET",
+    url: process.env.URL,
+    params: { country: "US" },
+    headers: {
+        "X-RapidAPI-Key": process.env.XRapidAPIKey,
+        "X-RapidAPI-Host": process.env.XRapidAPIHost,
+    },
 };
+
+
+// this method  fetchs item price from Amazon API using item url
+async function fetchPrice(url) {
+    let arr = url.split("/");
+    let pID = "";
+    for (let i = 0; i < arr.length; i++) {
+        if (arr[i] === "dp") pID = arr[i + 1];
+    }
+    //console.log(pID);
+    options.params.productId = pID;
+    let pData = await axios.request(options).then((resp) => {
+        return resp.data;
+    });
+
+    return { success: true, data: pData };
+}
 
 // this method uses the above fetch method to fetch prices of multiple items
 async function fetchPArray(priceArr) {
-    console.log(priceArr);
     let res = await priceArr.map((url) => {
-        //await delay(10000);
         return fetchPrice(url);
     });
 
-    //console.log("pricearr res", res);
     return res;
 }
 
@@ -136,52 +84,24 @@ async function fetchPArray(priceArr) {
 router.post("/loadData", (req, res) => {
     const { userID, email } = req.body;
 
-    Data.findOne(
-        { userID: userID },
-        (err, data) => {
-            if (err) res.json({ success: false, err: err });;
+    Data.findOne({ userID: userID }, (err, data) => {
+        //console.log(data);
+        if (err) res.json({ success: false, err: err });
 
-            if (!data) {
-                let data = new Data();
-                data.userID = userID;
-                data.email = email;
-                console.log("new data", data);
-                data.save(err => {
-                    if (err) res.json({ success: false, err: err });
-                    res.json({ success: true, data: data })
-                })
-            }
-            else {
-
-                let urlArr = data.urlArr;
-
-
-                // console.log(urlArr);
-                fetchPArray(urlArr)
-                    .then(resp => {
-                        Promise.all(resp).then(pArr => {
-                            console.log("p array", pArr);
-
-
-                            let currentPArr = pArr.map(priceObj => {
-                                if (priceObj.success) {
-                                    return priceObj.data.replace('$', '');
-                                }
-                                else return 'no such element';
-                            });
-
-                            console.log("retrieved data:", data, currentPArr);
-                            data.currentPArr = currentPArr;
-                            res.json({ success: true, data: data });
-                        })
-
-
-                    }).catch(err => console.log(err))
-            }
-
+        if (!data) {
+            let data = new Data();
+            data.userID = userID;
+            data.email = email;
+            console.log("new data", data);
+            data.save((err) => {
+                if (err) res.json({ success: false, err: err });
+                res.json({ success: true, data: data });
+            });
+        } else {
+            res.json({ success: true, data: data });
         }
-    )
-})
+    });
+});
 
 
 
@@ -219,73 +139,78 @@ router.post("/setProfile", (req, res) => {
 
 });
 
-
-// router.post("/deleteAll", (req, res) => {
-//     db.collections.datas.deleteMany({}, (err, resp) => {
-//         if (err) return res.json({ success: false, message: err });
-//         else return res.json({ success: true, message: "Successfully deleted all docs!" });
-//     });
-// });
+//resets account
+router.post("/deleteAll", (req, res) => {
+    db.collections.datas.deleteMany({}, (err, resp) => {
+        if (err) return res.json({ success: false, message: err });
+        else
+            return res.json({
+                success: true,
+                message: "Successfully deleted all docs!",
+            });
+    });
+});
 
 // this method deletes current item whose price is being tracked
 router.post("/deleteItem", (req, res) => {
     const { userID, itemIndex } = req.body;
 
-    Data.findOne(
-        { userID: userID },
-        (err, data) => {
-            if (err) res.json({ success: false, err: err });
+    Data.findOne({ userID: userID }, (err, data) => {
+        if (err) res.json({ success: false, err: err });
 
-            console.log(data, userID);
+        let { itemNameArr, originalPArr, targetPArr, timeStampArr, urlArr, currentPArr } = data;
 
-            let { itemNameArr, originalPArr, targetPArr, timeStampArr, urlArr } = data;
+        itemNameArr.splice(itemIndex, 1);
+        originalPArr.splice(itemIndex, 1);
+        targetPArr.splice(itemIndex, 1);
+        timeStampArr.splice(itemIndex, 1);
+        urlArr.splice(itemIndex, 1);
+        currentPArr.aplice(itemIndex, 1);
 
-            itemNameArr.splice(itemIndex, 1);
-            originalPArr.splice(itemIndex, 1);
-            targetPArr.splice(itemIndex, 1);
-            timeStampArr.splice(itemIndex, 1);
-            urlArr.splice(itemIndex, 1);
-
-            fetchPArray(urlArr)
-                .then(resp => {
-                    Promise.all(resp).then(pArr => {
-                        let currentPArr = pArr.map(priceObj => {
-                            if (priceObj.success) return priceObj.data.replace('$', '');
-                            else return 'no such element';
-
-                        });
-
-                        Data.findOneAndUpdate(
-                            { userID: userID },
-                            { $set: { itemNameArr: itemNameArr, originalPArr: originalPArr, targetPArr: targetPArr, timeStampArr: timeStampArr, urlArr: urlArr } },
-                            { new: true },
-                            (err, data) => {
-                                if (err) res.json({ success: false, err: err });
-                                data.currentPArr = currentPArr;
-                                return res.json({ success: true, data: data });
-                            }
-                        )
-                    })
-                })
-        }
-    )
+        Data.findOneAndUpdate(
+            { userID: userID },
+            {
+                $set: {
+                    itemNameArr: itemNameArr,
+                    originalPArr: originalPArr,
+                    targetPArr: targetPArr,
+                    timeStampArr: timeStampArr,
+                    urlArr: urlArr,
+                    currentPArr: currentPArr
+                },
+            },
+            { new: true },
+            (err, data) => {
+                if (err) res.json({ success: false, err: err });
+                return res.json({ success: true, data: data });
+            }
+        );
+    });
 });
 
 // this method is used to compare user inputted current price of item with the fetched price to make sure web scrapping is working
 router.post("/confirmUrl", (req, res) => {
     const { url, price } = req.body;
     console.log("url is: ", url);
-    fetchPrice(url)
-        .then((resp) => {
-            console.log("response:", resp);
-            if (resp.success) {
-                let fetchedP = parseFloat(resp.data.replace('$', ''));
-                if (parseFloat(price) === fetchedP) return res.json({ success: true, data: resp.data });
-                else return res.json({ success: false, err: `entered price $${price} doesn't match fetched price $${fetchedP}` });
-            }
-            else return res.json({ success: false, err: resp.err });
-        })
-})
+    fetchPrice1(url).then((resp) => {
+        console.log("response:", resp.data.price_information);
+        if (resp.success && resp.data.price_information !== undefined) {
+            let fetchedP = resp.data.price_information.app_sale_price;
+            if (parseFloat(price) === fetchedP)
+                return res.json({
+                    success: true,
+                    data: resp.data.price_information.app_sale_price,
+                });
+            else
+                return res.json({
+                    success: false,
+                    err: `entered price $${price} doesn't match fetched price $${fetchedP}`,
+                });
+        } else if (resp.success)
+            res.json({ success: false, err: "error fetching price" });
+        else return res.json({ success: false, err: resp.err });
+    });
+});
 
 // this method is used to add an item whose price user wants to track
 router.post("/addUrl", (req, res) => {
@@ -294,7 +219,14 @@ router.post("/addUrl", (req, res) => {
     Data.findOne({ userID: userID }, (err, data) => {
         if (err) res.json({ success: false, err: err });
 
-        let { urlArr, itemNameArr, originalPArr, targetPArr, timeStampArr } = data;
+        let {
+            urlArr,
+            itemNameArr,
+            originalPArr,
+            targetPArr,
+            timeStampArr,
+            currentPArr,
+        } = data;
         let date = new Date();
 
         urlArr.push(url);
@@ -302,29 +234,27 @@ router.post("/addUrl", (req, res) => {
         originalPArr.push(originalP);
         targetPArr.push(targetP);
         timeStampArr.push(date);
+        currentPArr.push(originalP);
 
-        fetchPArray(urlArr)
-            .then(resp => {
-                Promise.all(resp).then(pArr => {
-                    let currentPArr = pArr.map(priceObj => {
-                        console.log(priceObj.data);
-                        return priceObj.data.replace('$', '');
-                    });
-
-                    Data.findOneAndUpdate(
-                        { userID: userID },
-                        { $set: { urlArr: urlArr, itemNameArr: itemNameArr, originalPArr: originalPArr, targetPArr: targetPArr, timeStampArr: timeStampArr } },
-                        { new: true },
-                        (err, data) => {
-                            if (err) res.json({ success: false, err: err });
-                            data.currentPArr = currentPArr;
-                            return res.json({ success: true, data: data });
-                        }
-                    )
-
-                })
-            })
-    })
+        Data.findOneAndUpdate(
+            { userID: userID },
+            {
+                $set: {
+                    itemNameArr: itemNameArr,
+                    originalPArr: originalPArr,
+                    targetPArr: targetPArr,
+                    timeStampArr: timeStampArr,
+                    urlArr: urlArr,
+                    currentPArr: currentPArr
+                },
+            },
+            { new: true },
+            (err, data) => {
+                if (err) res.json({ success: false, err: err });
+                return res.json({ success: true, data: data });
+            }
+        );
+    });
 });
 
 // this method is used to give access to a gmail account to send out price alert emails to users 
