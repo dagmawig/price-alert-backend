@@ -7,8 +7,11 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const { default: axios } = require('axios');
 const nodemailer = require('nodemailer');
+const sgMail = require("@sendgrid/mail");
+const rateLimit = require("axios-rate-limit");
 
 require('dotenv').config();
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 const StealthPlugin = require('puppeteer-extra-plugin-stealth')
 pup.use(StealthPlugin())
@@ -53,22 +56,30 @@ let options = {
     },
 };
 
+// this limits the API request rate since the API we use has rate limit
+const http = rateLimit(axios.create(), {
+    maxRequests: 1,
+    perMilliseconds: 1500,
+  });
 
 // this method  fetchs item price from Amazon API using item url
 async function fetchPrice(url) {
     let arr = url.split("/");
     let pID = "";
     for (let i = 0; i < arr.length; i++) {
-        if (arr[i] === "dp") pID = arr[i + 1];
+      if (arr[i] === "dp") pID = arr[i + 1];
     }
-    //console.log(pID);
-    options.params.productId = pID;
-    let pData = await axios.request(options).then((resp) => {
-        return resp.data;
+    options.url = process.env.URL + pID;
+  
+    let newData = await http.get(options.url, options).then((resp) => {
+      return resp.data;
     });
-
-    return { success: true, data: pData };
-}
+    // let pData = await axios.request(options).then((resp) => {
+    //   return resp.data;
+    // });
+  
+    return { success: true, data: newData };
+  }
 
 // this method uses the above fetch method to fetch prices of multiple items
 async function fetchPArray(priceArr) {
@@ -194,7 +205,7 @@ router.post("/confirmUrl", (req, res) => {
     console.log("url is: ", url);
     fetchPrice1(url).then((resp) => {
         console.log("response:", resp.data.price_information);
-        if (resp.success && resp.data.price_information !== undefined) {
+        if (resp.success && resp.data.price_information) {
             let fetchedP = resp.data.price_information.app_sale_price;
             if (parseFloat(price) === fetchedP)
                 return res.json({
@@ -257,74 +268,164 @@ router.post("/addUrl", (req, res) => {
     });
 });
 
-// this method is used to give access to a gmail account to send out price alert emails to users 
-var transporter = nodemailer.createTransport({
-    service: "gmail",
-    auth: {
-        type: 'OAuth2',
-        user: process.env.USER,
-        pass: process.env.PASS,
-        clientId: process.env.CLIENT_ID,
-        clientSecret: process.env.CLIENT_SECRET,
-        refreshToken: process.env.REFRESH_TOKEN
-    }
-});
-
-
-
-// this is the alert email template object
-var mailOptions = {
-    from: "111automail@gmail.com",
-    to: "",
-    subject: "",
-    text: ""
-}
-
-
-// this method sends emails to users for price alert
-function sendEmail() {
-    transporter.sendMail(mailOptions, function (error, info) {
-        if (error) {
-            console.log(error);
-        } else {
-            console.log("Email sent: " + info.response);
-        }
-    });
-}
-
-// this method regularly checks price of items being tracks and sends alert email to users when target price is reached
-let checkPrice = function () {
+// this router is used to check for prices regularly and send email alerts
+router.post("/checkPrice", (req, res) => {
+    console.log("checking price...")
     Data.find({}, (err, data) => {
-        data.map(user => {
-            let email = user.email;
-            let urlArr = user.urlArr;
-            let targetPArr = user.targetPArr;
-            let itemNameArr = user.itemNameArr;
-            urlArr.map((url, i) => {
-                fetchPrice(url).then(priceObj => {
-                    if (priceObj.success) {
-                        let price = parseFloat(priceObj.data.replace('$', ''));
-                        let targetP = parseFloat(targetPArr[i]);
-
-                        console.log("price is: ", price, "target p is: ", targetP);
-
-                        if (price <= targetP) {
-                            mailOptions.to = email;
-                            mailOptions.subject = `Price Alert for ${itemNameArr[i]}!!!!!`;
-                            mailOptions.text = `Hello there!! \nCurrent price for ${itemNameArr[i]}  is $${price.toFixed(2)}! \nYour target price was $${targetPArr[i]}. \nPurchase the item here!! \n${urlArr[i]}`;
-
-                            sendEmail();
-                        }
-                    }
-                })
+      handleUserArr(data).then((resp) => {
+        Promise.all(resp).then((respObj) => {
+          updateCurrentP(respObj).then(response=> {
+            Promise.all(response).then(re=> {
+              res.json({success: true, data: re})
             })
+          })
+          console.log("checkP", respObj);
+        });
+      });
+    });
+  });
+
+// this method is used to update current Prices in user data after price check
+async function updateCurrentP(returnArr) {
+    let res = await returnArr.map((resObj) => {
+      let newCurrentPArr = [];
+      for (let priceObj of resObj.priceArr) {
+        console.log(priceObj.newP)
+        let formattedP
+        let left = Math.floor(priceObj.newP);
+        console.log(left)
+        let right = Math.floor((priceObj.newP-left)*100);
+        console.log(right)
+        formattedP = left.toString() + "." + right.toString()
+        newCurrentPArr.push(formattedP);
+      }
+  
+      return Data.findOneAndUpdate(
+        { userID: resObj.userID },
+        {
+          $set: {
+            currentPArr: newCurrentPArr,
+          },
+        },
+        { new: true },
+        (err, data) => {
+          if (err) console.log(err);
+          else console.log("save success after price check");
+        }
+      );
+    });
+    
+    return res;
+  }
+
+// this method is used to check for prices by going through each users doc
+async function handleUserArr(userArr) {
+    let res = await userArr.map((user) => {
+      let { email, urlArr, targetPArr, itemNameArr, currentPArr, originalPArr } =
+        user;
+  
+      return fetchPArray(urlArr)
+        .then((response) => {
+          return Promise.all(response).then((pArr) => {
+            //console.log(pArr)
+            let respArr = [];
+            return sendEArr(
+              {
+                email,
+                urlArr,
+                targetPArr,
+                itemNameArr,
+                currentPArr,
+                originalPArr,
+              },
+              pArr
+            ).then((resp) => {
+              return Promise.all(resp)
+                .then((emailArr) => {
+                  emailArr.map((emailed, i) => {
+                    respArr.push({
+                      email: email,
+                      itemName: itemNameArr[i],
+                      targetP: targetPArr[i],
+                      originalP: originalPArr[i],
+                      newP:
+                        pArr[i].success &&
+                        pArr[i].data.price_information &&
+                        pArr[i].data.price_information.app_sale_price
+                          ? pArr[i].data.price_information.app_sale_price
+                          : "can't get price",
+                      emailSent: emailed,
+                      priceError:
+                        pArr[i].success &&
+                        pArr[i].data.price_information &&
+                        pArr[i].data.price_information.app_sale_price
+                          ? "no error"
+                          : pArr[i].success
+                          ? "item doesn't exist"
+                          : "fetching error",
+                    });
+                  });
+                })
+                .then(() => {
+                  return { userID: user.userID, priceArr: respArr };
+                });
+            });
+          });
         })
-    })
-}
+        .catch((err) => console.log(err));
+    });
+  
+    return res;
+  }
 
-//checkPrice();
-let checkInterval = setInterval(checkPrice, 86400000);
-
+// this is the email sending options
+const msg = {
+    to: "",
+    from: "111automail@gmail.com",
+    subject: "Amazon Price Drop Alert",
+    text: "empty text",
+    html: "empty",
+  };
+  
+  // this method is used to send email alerts
+  async function sendEmail(email, message) {
+    (msg.text = "Price drop text"), (msg.html = message);
+    msg.to = email;
+  
+    const res = await sgMail
+      .send(msg)
+      .then((response) => {
+        console.log(response[0].statusCode);
+        console.log(response[0].headers);
+        return true;
+      })
+      .catch((err) => {
+        console.log(err);
+        return err;
+      });
+    return res;
+  }
+  
+  // this method is used to handle sending an array of emails
+  async function sendEArr(itemInfo, pRespArr) {
+    let { email, urlArr, targetPArr, itemNameArr, currentPArr, originalPArr } =
+      itemInfo;
+  
+    let res = await itemNameArr.map((name, i) => {
+      if (
+        pRespArr[i].success &&
+        pRespArr[i].data.price_information &&
+        pRespArr[i].data.price_information.app_sale_price &&
+        pRespArr[i].data.price_information.app_sale_price <= targetPArr[i]
+      ) {
+        let message = `Price for ${name} is $${pRespArr[i].data.price_information.app_sale_price}!
+      Original price was ${originalPArr[i]}. Target price is $${targetPArr[i]}. Product url is at ${urlArr[i]}`;
+        return sendEmail(email, message);
+      } else return false;
+    });
+    return res;
+  }
+  
 
 // append /api for our http requests
 app.use("/", router);
